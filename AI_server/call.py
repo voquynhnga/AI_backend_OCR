@@ -7,6 +7,7 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import torch.nn.functional as F
+from define import CNNBiLSTMCTC, HandwritingDataset
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -14,17 +15,7 @@ base_dir = Path.cwd()
 checkpoint_dir = base_dir / "checkpoints"
 
 best_model_path = checkpoint_dir / "best_model.pth"
-last_model_path = checkpoint_dir / "last_model.pth"
-
-if best_model_path.exists():
-    checkpoint_path = best_model_path
-elif last_model_path.exists():
-    checkpoint_path = last_model_path
-else:
-    raise FileNotFoundError(
-        f"No checkpoint found. Expected one of: {best_model_path} or {last_model_path}"
-    )
-
+checkpoint_path = best_model_path
 ckpt = torch.load(str(checkpoint_path), map_location=device)
 
 if isinstance(ckpt, dict) and "char_to_idx" in ckpt:
@@ -54,7 +45,7 @@ test_csv = data_root / "test_labels.csv"
 if not test_csv.exists():
     raise FileNotFoundError(f"Missing test CSV: {test_csv}")
 
-test_image_paths, test_labels = load_labels_csv(test_csv)
+test_image_paths, test_labels = HandwritingDataset.load_labels_csv(test_csv)
 if not test_image_paths:
     raise RuntimeError("No valid test samples loaded from CSV.")
 
@@ -71,7 +62,7 @@ test_loader = DataLoader(
     shuffle=False,
     num_workers=0,
     pin_memory=(device.type == "cuda"),
-    collate_fn=collate_fn
+    collate_fn=HandwritingDataset.collate_fn
 )
 
 all_pred_texts = []

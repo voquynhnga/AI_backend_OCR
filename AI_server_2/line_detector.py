@@ -79,7 +79,7 @@ class RuledPaperLineDetector:
         min_cc_area: int = 30,
         min_cc_height: int = 8,
         max_cc_height_ratio: float = 0.25,
-        max_cc_width_ratio: float = 0.5,
+        max_cc_width_ratio: float = 0.85,
         y_gap_factor: float = 0.7,
         min_components_per_line: int = 4,
         min_strength_ratio: float = 0.18,
@@ -193,11 +193,28 @@ class RuledPaperLineDetector:
             y1 = min(c[1] for c in cluster)
             x2 = max(c[2] for c in cluster)
             y2 = max(c[3] for c in cluster)
+            
             if (x2 - x1) < min_w_line:
                 continue
-            if (y2 - y1) < self.min_line_height:
+                
+            line_h = y2 - y1
+            if line_h < self.min_line_height:
                 continue
-            boxes.append(Box(x1, y1, x2, y2).pad(self.pad_x, self.pad_y, W, H))
+
+            # ========================================================
+            # FIX LỖI CHỮ NGHIÊNG (SLANT COMPENSATION)
+            # ========================================================
+            # Bù đắp độ nghiêng: nới rộng lề X tỷ lệ thuận với chiều cao dòng.
+            # 0.35 tương đương bù đắp cho góc nghiêng khoảng ~20 độ (tan(20°) ≈ 0.36)
+            dynamic_pad_x = int(line_h * 0.35)
+            
+            # Lấy giá trị lớn nhất giữa pad_x mặc định và pad_x động
+            actual_pad_x = max(self.pad_x, dynamic_pad_x)
+            
+            # Nới lề y thêm một chút (thường chữ nghiêng cũng hay có nét móc dài)
+            actual_pad_y = max(self.pad_y, int(line_h * 0.1))
+
+            boxes.append(Box(x1, y1, x2, y2).pad(actual_pad_x, actual_pad_y, W, H))
 
         boxes.sort(key=lambda b: (b.y1, b.x1))
         return boxes

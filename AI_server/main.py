@@ -39,7 +39,7 @@ _PARENT = Path(__file__).resolve().parent.parent
 if str(_PARENT) not in sys.path:
     sys.path.insert(0, str(_PARENT))
 
-from backend_3.line_detector import RuledPaperLineDetector  # noqa: E402
+from AI_server_2.line_detector import RuledPaperLineDetector  # noqa: E402
 from .recognizer import CRNNRecognizer                       # noqa: E402
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -126,42 +126,89 @@ class PredictResponse(BaseModel):
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 @app.get("/health", tags=["system"])
 def health() -> dict:
-    return {
+    print("[DEBUG] /health endpoint called")
+    result = {
         "status": "ok",
         "checkpoint": str(CHECKPOINT),
         "device": str(_recognizer.device) if _recognizer else "not_loaded",
     }
+    print(f"[DEBUG] /health response: {result}")
+    return result
 
 
 @app.post("/predict", response_model=PredictResponse, tags=["ocr"])
 async def predict(file: UploadFile = File(..., description="Ảnh chứa chữ viết tay")) -> PredictResponse:
-    data = await file.read()
-    arr  = np.frombuffer(data, dtype=np.uint8)
-    img  = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    print(f"\n{'='*80}")
+    print(f"[DEBUG] /predict endpoint called with file: {file.filename}")
+    print(f"{'='*80}")
+    try:
+        data = await file.read()
+        print(f"[DEBUG] File size: {len(data)} bytes")
+        arr  = np.frombuffer(data, dtype=np.uint8)
+        img  = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        print(f"[DEBUG] Image decoded, shape: {img.shape if img is not None else 'None'}")
+        if img is not None:
+            print(f"[DEBUG] Image dtype: {img.dtype}, min: {img.min()}, max: {img.max()}, mean: {img.mean():.2f}")
 
-    if img is None:
-        raise HTTPException(status_code=400, detail="Không đọc được ảnh. Hãy gửi file jpg/png hợp lệ.")
+        if img is None:
+            print("[DEBUG] Image decode failed")
+            raise HTTPException(status_code=400, detail="Không đọc được ảnh. Hãy gửi file jpg/png hợp lệ.")
 
-    boxes = _line_detector.detect(img)
-    if not boxes:
-        logger.info("[predict] %s → 0 dòng", file.filename)
-        return PredictResponse(num_lines=0, lines=[], full_text="")
+        print("[DEBUG] Starting line detection...")
+        boxes = _line_detector.detect(img)
+        print(f"[DEBUG] Detected {len(boxes)} lines")
+        
+        for i, b in enumerate(boxes):
+            print(f"[DEBUG]   Line {i}: bbox=({b.x1}, {b.y1}) → ({b.x2}, {b.y2}), size=({b.x2-b.x1}, {b.y2-b.y1})")
+        
+        if not boxes:
+            logger.info("[predict] %s → 0 dòng", file.filename)
+            print("[DEBUG] No lines detected, returning empty response")
+            return PredictResponse(num_lines=0, lines=[], full_text="")
 
-    crops = [img[b.y1:b.y2, b.x1:b.x2] for b in boxes]
-    texts = _recognizer.predict_batch(crops)
+        print(f"\n[DEBUG] Extracting {len(boxes)} crops...")
+        crops = []
+        pad_x = 45  # Nới rộng lề trái/phải 20 pixel để không lẹm chữ
+        pad_y = 10   # Nới trên/dưới 5 pixel
+        
+        for i, b in enumerate(boxes):
+            # Tính toán tọa độ mới, đảm bảo không vượt quá kích thước ảnh gốc
+            x1_safe = max(0, b.x1 - pad_x)
+            y1_safe = max(0, b.y1 - pad_y)
+            x2_safe = min(img.shape[1], b.x2 + pad_x)
+            y2_safe = min(img.shape[0], b.y2 + pad_y)
+            
+            crop = img[y1_safe:y2_safe, x1_safe:x2_safe]
+            crops.append(crop)
+            print(f"[DEBUG]   Crop {i}: shape={crop.shape}, dtype={crop.dtype}, min={crop.min()}, max={crop.max()}, mean={crop.mean():.2f}")
+        
+        print(f"\n[DEBUG] Running CRNN prediction on {len(crops)} crops...")
+        texts = _recognizer.predict_batch(crops)
+        
+        for i, text in enumerate(texts):
+            print(f"[DEBUG]   Prediction {i}: '{text}'")
 
-    lines = [
-        LineResult(line_index=i, text=text, bbox=BBox(x1=b.x1, y1=b.y1, x2=b.x2, y2=b.y2))
-        for i, (b, text) in enumerate(zip(boxes, texts))
-    ]
+        lines = [
+            LineResult(line_index=i, text=text, bbox=BBox(x1=b.x1, y1=b.y1, x2=b.x2, y2=b.y2))
+            for i, (b, text) in enumerate(zip(boxes, texts))
+        ]
 
-    logger.info("[predict] %s → %d dòng: %s", file.filename, len(lines), texts)
+        logger.info("[predict] %s → %d dòng: %s", file.filename, len(lines), texts)
+        print(f"\n[DEBUG] Returning {len(lines)} lines")
+        full_text_joined = "\n".join(r.text for r in lines)
+        print(f"[DEBUG] Full text: {repr(full_text_joined)}")
+        print(f"{'='*80}\n")
 
-    return PredictResponse(
-        num_lines=len(lines),
-        lines=lines,
-        full_text="\n".join(r.text for r in lines),
-    )
+        return PredictResponse(
+            num_lines=len(lines),
+            lines=lines,
+            full_text="\n".join(r.text for r in lines),
+        )
+    except Exception as e:
+        print(f"[DEBUG] ERROR in /predict: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 
 # ── /grade helpers ───────────────────────────────────────────────────────────

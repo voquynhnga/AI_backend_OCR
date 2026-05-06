@@ -8,8 +8,8 @@ REM =======================================================================
 
 setlocal
 
-set "VENV_PY=C:\venvs\be_server\Scripts\python.exe"
-set "PROJECT_DIR=d:\ki8\xla\BE_server"
+set "VENV_PY=C:\Users\voquy\AppData\Local\Programs\Python\Python311\python.exe"
+set "PROJECT_DIR=F:\OneDrive\TAI_LIEU_HK8\XLA\AI_backend_OCR"
 set "HOST=0.0.0.0"
 set "PORT=8000"
 
