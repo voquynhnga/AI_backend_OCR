@@ -200,6 +200,45 @@ class CRNNRecognizer:
             results.append(result)
         
         return results
+    
+    def _ctc_beam_decode(self, log_probs: torch.Tensor, beam_width: int = 5) -> List[str]:
+        """CTC beam search decode."""
+        probs = log_probs.exp()  # (T, B, C)
+        B = probs.shape[1]
+        results = []
+        
+        for b in range(B):
+            p = probs[:, b, :].cpu().numpy()  # (T, C)
+            
+            # Beam: list of (score, sequence)
+            beams = [(0.0, [])]
+            
+            for t in range(len(p)):
+                new_beams = {}
+                for score, seq in beams:
+                    for c in range(p.shape[1]):
+                        new_score = score + np.log(p[t, c] + 1e-10)
+                        # CTC collapse: bỏ blank(0) và ký tự lặp
+                        if c == 0:
+                            new_seq = seq
+                        elif len(seq) > 0 and seq[-1] == c:
+                            new_seq = seq
+                        else:
+                            new_seq = seq + [c]
+                        
+                        key = tuple(new_seq)
+                        if key not in new_beams or new_beams[key] < new_score:
+                            new_beams[key] = new_score
+                
+                # Giữ top beam_width
+                beams = sorted(new_beams.items(), key=lambda x: x[1], reverse=True)[:beam_width]
+                beams = [(score, list(seq)) for seq, score in beams]
+            
+            best_seq = beams[0][1] if beams else []
+            text = "".join(self.idx_to_char.get(c, "") for c in best_seq)
+            results.append(text)
+        
+        return results
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -243,7 +282,10 @@ class CRNNRecognizer:
         print(f"[CRNN DEBUG] Log probs shape: {log_probs.shape}")
         print(f"[CRNN DEBUG] Log probs stats: min={log_probs.min():.4f}, max={log_probs.max():.4f}")
         
+        # results = self._ctc_beam_decode(log_probs, beam_width=5)
+
         results = self._ctc_greedy_decode(log_probs)
+
         print(f"[CRNN DEBUG] Decoded results: {results}")
         
         return results

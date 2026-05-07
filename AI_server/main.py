@@ -81,52 +81,46 @@ app.add_middleware(
 _line_detector: RuledPaperLineDetector | None = None
 _recognizer:    CRNNRecognizer | None         = None
 
-
-def deskew_page(img_bgr: np.ndarray) -> np.ndarray:
-    """Làm thẳng ảnh toàn trang trước khi detect dòng."""
+def crop_to_paper(img_bgr: np.ndarray) -> np.ndarray:
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    H, W = img_bgr.shape[:2]
     
-    # Binary, chữ trắng nền đen
-    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    
-    # Tìm góc nghiêng qua tất cả pixel chữ
-    coords = np.column_stack(np.where(bw > 0))
-    if len(coords) < 100:
-        return img_bgr  # không đủ pixel để tính
-    
-    angle = cv2.minAreaRect(coords)[2]
-    
-    # Chuẩn hóa góc về (-45, 45)
-    if angle < -45:
-        angle = 90 + angle
-    elif angle > 45:
-        angle = angle - 90
-    
-    # Chỉ deskew nếu nghiêng đáng kể (tránh rotate ảnh thẳng)
-    if abs(angle) < 0.3:
-        return img_bgr
-    
-    print(f"[DEBUG] Deskewing page by {angle:.2f} degrees")
-    
-    h, w = img_bgr.shape[:2]
-    M = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
-    
-    # Tính kích thước ảnh mới để không bị crop góc
-    cos = abs(M[0, 0])
-    sin = abs(M[0, 1])
-    new_w = int(h * sin + w * cos)
-    new_h = int(h * cos + w * sin)
-    M[0, 2] += (new_w - w) / 2
-    M[1, 2] += (new_h - h) / 2
-    
-    rotated = cv2.warpAffine(
-        img_bgr, M, (new_w, new_h),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(255, 255, 255)  # nền trắng
-    )
-    return rotated
+    for thresh in [200, 180, 160]:
+        _, paper_mask = cv2.threshold(gray, thresh, 255, cv2.THRESH_BINARY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (80, 80))
+        paper_mask = cv2.morphologyEx(paper_mask, cv2.MORPH_CLOSE, kernel)
+        paper_mask = cv2.morphologyEx(paper_mask, cv2.MORPH_OPEN, kernel)
+        
+        contours, _ = cv2.findContours(paper_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+        
+        largest = max(contours, key=cv2.contourArea)
+        ratio = cv2.contourArea(largest) / (H * W)
+        
+        if ratio < 0.15:
+            continue
 
+        # ✅ Nếu giấy chiếm >75% ảnh → không crop, giữ nguyên
+        # Vì lúc này ranh giới giấy không rõ → dễ cắt mất chữ sát lề
+        if ratio > 0.35:
+            print(f"[DEBUG] Paper ratio={ratio:.2f} > 0.35, skip crop")
+            # Gọt lùi vào trong 1.5% (khoảng 20-30 pixel) ở cả 4 cạnh 
+            # để vứt bỏ hoàn toàn viền đen/bóng râm bám sát mép camera
+            pad_y = max(10, int(H * 0.015))
+            pad_x = max(10, int(W * 0.015))
+            return img_bgr[pad_y:H-pad_y, pad_x:W-pad_x]
+
+        x, y, w, h = cv2.boundingRect(largest)
+        PAD = 30
+        x = max(0, x - PAD)
+        y = max(0, y - PAD)
+        x2 = min(W, x + w + PAD * 2)
+        y2 = min(H, y + h + PAD * 2)
+        print(f"[DEBUG] Paper crop: thresh={thresh}, ratio={ratio:.2f}")
+        return img_bgr[y:y2, x:x2]
+    
+    return img_bgr
 
 @app.on_event("startup")
 def _load_models() -> None:
@@ -200,39 +194,35 @@ async def predict(file: UploadFile = File(..., description="Ảnh chứa chữ v
             print("[DEBUG] Image decode failed")
             raise HTTPException(status_code=400, detail="Không đọc được ảnh...")
         
-        # --- THÊM VÀO ĐÂY ---
-        print("[DEBUG] Deskewing image before detection...")
-        img = deskew_page(img)  # Chú ý: phải gán lại img = ...
-        # --------------------
+        img = crop_to_paper(img)
 
-        print("[DEBUG] Starting line detection...")
         boxes = _line_detector.detect(img)
-        print(f"[DEBUG] Detected {len(boxes)} lines")
         
         for i, b in enumerate(boxes):
             print(f"[DEBUG]   Line {i}: bbox=({b.x1}, {b.y1}) → ({b.x2}, {b.y2}), size=({b.x2-b.x1}, {b.y2-b.y1})")
         
         if not boxes:
             logger.info("[predict] %s → 0 dòng", file.filename)
-            print("[DEBUG] No lines detected, returning empty response")
             return PredictResponse(num_lines=0, lines=[], full_text="")
         
-        deskew_page(img)
         print(f"\n[DEBUG] Extracting {len(boxes)} crops...")
         crops = []
-        pad_x = 45  # Nới rộng lề trái/phải 20 pixel để không lẹm chữ
-        pad_y = 15 # Nới trên/dưới 5 pixel
+        pad_x = 30  # Nới rộng lề trái/phải 20 pixel để không lẹm chữ
+        pad_y = 8 # Nới trên/dưới 5 pixel
         
         for i, b in enumerate(boxes):
-            # Tính toán tọa độ mới, đảm bảo không vượt quá kích thước ảnh gốc
-            x1_safe = max(0, b.x1 - pad_x)
-            y1_safe = max(0, b.y1 - pad_y)
-            x2_safe = min(img.shape[1], b.x2 + pad_x)
-            y2_safe = min(img.shape[0], b.y2 + pad_y)
+            # # Tính toán tọa độ mới, đảm bảo không vượt quá kích thước ảnh gốc
+            # x1_safe = max(0, b.x1 - pad_x)
+            # y1_safe = max(0, b.y1 - pad_y)
+            # x2_safe = min(img.shape[1], b.x2 + pad_x)
+            # y2_safe = min(img.shape[0], b.y2 + pad_y)
             
-            crop = img[y1_safe:y2_safe, x1_safe:x2_safe]
+            # crop = img[y1_safe:y2_safe, x1_safe:x2_safe]
+            crop = img[b.y1:b.y2, b.x1:b.x2]
             crops.append(crop)
             print(f"[DEBUG]   Crop {i}: shape={crop.shape}, dtype={crop.dtype}, min={crop.min()}, max={crop.max()}, mean={crop.mean():.2f}")
+
+  
         
         print(f"\n[DEBUG] Running CRNN prediction on {len(crops)} crops...")
         texts = _recognizer.predict_batch(crops)

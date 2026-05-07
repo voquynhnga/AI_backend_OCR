@@ -45,10 +45,10 @@ class Box:
 
 
 def _binarize(gray: np.ndarray) -> np.ndarray:
-    blur = cv2.GaussianBlur(gray, (3, 3), 0)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)  # blur mạnh hơn cho bút chì mờ
     bw = cv2.adaptiveThreshold(
         blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV, blockSize=31, C=15,
+        cv2.THRESH_BINARY_INV, blockSize=71, C=4,  # blockSize lớn hơn, C nhỏ hơn
     )
     return bw
 
@@ -126,12 +126,12 @@ class RuledPaperLineDetector:
         max_cc_height_ratio: float = 0.25,
         max_cc_width_ratio: float = 0.85,
         y_gap_factor: float = 0.7,
-        min_components_per_line: int = 4,
-        min_strength_ratio: float = 0.18,
+        min_components_per_line: int = 1,
+        min_strength_ratio: float = 0.02,
         min_line_height: int = 18,
-        min_line_width_ratio: float = 0.06,
-        pad_x: int = 20,
-        pad_y: int = 4,
+        min_line_width_ratio: float = 0.02,
+        pad_x: int = 40,
+        pad_y: int = 10,
     ):
         self.min_cc_area = min_cc_area
         self.min_cc_height = min_cc_height
@@ -194,7 +194,7 @@ class RuledPaperLineDetector:
             proj.reshape(-1, 1), (1, ksize), sigma,
         ).flatten()
 
-        peak_thresh = max(2.0, float(np.max(proj_s)) * 0.20)
+        peak_thresh = max(2.0, float(np.max(proj_s)) * 0.03)
         peaks: List[int] = []
         min_dist = max(int(ref_h * 1.0), 12)
         last_peak = -10**9
@@ -214,7 +214,7 @@ class RuledPaperLineDetector:
 
         clusters: List[List[Tuple[int, int, int, int, float]]] = [[] for _ in peaks]
         peaks_arr = np.array(peaks, dtype=np.float32)
-        max_dist_to_peak = ref_h * 1.0
+        max_dist_to_peak = ref_h * 3.0
         for cb in ccs:
             dists = np.abs(peaks_arr - cb[4])
             k = int(np.argmin(dists))
@@ -262,5 +262,24 @@ class RuledPaperLineDetector:
             boxes.append(Box(x1, y1, x2, y2).pad(actual_pad_x, actual_pad_y, W, H))
 
         boxes.sort(key=lambda b: (b.y1, b.x1))
-        boxes = _merge_overlapping_boxes(boxes, overlap_ratio=0.5)
+        boxes = _merge_overlapping_boxes(boxes, overlap_ratio=0.35)
+        # Lọc bỏ box không phải chữ dựa trên mật độ pixel
+        valid_boxes = []
+        for box in boxes:
+            region = image_bgr[box.y1:box.y2, box.x1:box.x2]
+            gray_region = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+            _, bw = cv2.threshold(gray_region, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            density = bw.mean() / 255.0  # tỉ lệ pixel chữ
+            
+            # Chữ viết tay thường có density 3%-25%
+            # Vân gỗ/nhiễu có density rất cao (>35%) hoặc rất thấp
+            if 0.005 <= density <= 0.3:
+                valid_boxes.append(box)
+            else:
+                print(f"[DEBUG] Filtered box ({box.x1},{box.y1})→({box.x2},{box.y2}): density={density:.3f}")
+
+        valid_boxes = [b for b in valid_boxes if b.w > W * 0.02 and b.h > 15]
+
+
+        boxes = valid_boxes
         return boxes
