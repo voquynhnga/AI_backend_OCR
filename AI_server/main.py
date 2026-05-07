@@ -39,7 +39,7 @@ _PARENT = Path(__file__).resolve().parent.parent
 if str(_PARENT) not in sys.path:
     sys.path.insert(0, str(_PARENT))
 
-from AI_server_2.line_detector import RuledPaperLineDetector  # noqa: E402
+from .line_detector import RuledPaperLineDetector  # noqa: E402
 from .recognizer import CRNNRecognizer                       # noqa: E402
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -198,8 +198,13 @@ async def predict(file: UploadFile = File(..., description="Ảnh chứa chữ v
 
         if img is None:
             print("[DEBUG] Image decode failed")
-            raise HTTPException(status_code=400, detail="Không đọc được ảnh. Hãy gửi file jpg/png hợp lệ.")
+            raise HTTPException(status_code=400, detail="Không đọc được ảnh...")
         
+        # --- THÊM VÀO ĐÂY ---
+        print("[DEBUG] Deskewing image before detection...")
+        img = deskew_page(img)  # Chú ý: phải gán lại img = ...
+        # --------------------
+
         print("[DEBUG] Starting line detection...")
         boxes = _line_detector.detect(img)
         print(f"[DEBUG] Detected {len(boxes)} lines")
@@ -211,7 +216,8 @@ async def predict(file: UploadFile = File(..., description="Ảnh chứa chữ v
             logger.info("[predict] %s → 0 dòng", file.filename)
             print("[DEBUG] No lines detected, returning empty response")
             return PredictResponse(num_lines=0, lines=[], full_text="")
-
+        
+        deskew_page(img)
         print(f"\n[DEBUG] Extracting {len(boxes)} crops...")
         crops = []
         pad_x = 45  # Nới rộng lề trái/phải 20 pixel để không lẹm chữ
