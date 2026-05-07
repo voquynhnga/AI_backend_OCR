@@ -82,6 +82,52 @@ _line_detector: RuledPaperLineDetector | None = None
 _recognizer:    CRNNRecognizer | None         = None
 
 
+def deskew_page(img_bgr: np.ndarray) -> np.ndarray:
+    """Làm thẳng ảnh toàn trang trước khi detect dòng."""
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    
+    # Binary, chữ trắng nền đen
+    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    
+    # Tìm góc nghiêng qua tất cả pixel chữ
+    coords = np.column_stack(np.where(bw > 0))
+    if len(coords) < 100:
+        return img_bgr  # không đủ pixel để tính
+    
+    angle = cv2.minAreaRect(coords)[2]
+    
+    # Chuẩn hóa góc về (-45, 45)
+    if angle < -45:
+        angle = 90 + angle
+    elif angle > 45:
+        angle = angle - 90
+    
+    # Chỉ deskew nếu nghiêng đáng kể (tránh rotate ảnh thẳng)
+    if abs(angle) < 0.3:
+        return img_bgr
+    
+    print(f"[DEBUG] Deskewing page by {angle:.2f} degrees")
+    
+    h, w = img_bgr.shape[:2]
+    M = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
+    
+    # Tính kích thước ảnh mới để không bị crop góc
+    cos = abs(M[0, 0])
+    sin = abs(M[0, 1])
+    new_w = int(h * sin + w * cos)
+    new_h = int(h * cos + w * sin)
+    M[0, 2] += (new_w - w) / 2
+    M[1, 2] += (new_h - h) / 2
+    
+    rotated = cv2.warpAffine(
+        img_bgr, M, (new_w, new_h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(255, 255, 255)  # nền trắng
+    )
+    return rotated
+
+
 @app.on_event("startup")
 def _load_models() -> None:
     global _line_detector, _recognizer
@@ -153,7 +199,7 @@ async def predict(file: UploadFile = File(..., description="Ảnh chứa chữ v
         if img is None:
             print("[DEBUG] Image decode failed")
             raise HTTPException(status_code=400, detail="Không đọc được ảnh. Hãy gửi file jpg/png hợp lệ.")
-
+        
         print("[DEBUG] Starting line detection...")
         boxes = _line_detector.detect(img)
         print(f"[DEBUG] Detected {len(boxes)} lines")
@@ -169,7 +215,7 @@ async def predict(file: UploadFile = File(..., description="Ảnh chứa chữ v
         print(f"\n[DEBUG] Extracting {len(boxes)} crops...")
         crops = []
         pad_x = 45  # Nới rộng lề trái/phải 20 pixel để không lẹm chữ
-        pad_y = 10   # Nới trên/dưới 5 pixel
+        pad_y = 15 # Nới trên/dưới 5 pixel
         
         for i, b in enumerate(boxes):
             # Tính toán tọa độ mới, đảm bảo không vượt quá kích thước ảnh gốc

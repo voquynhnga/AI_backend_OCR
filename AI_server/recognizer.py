@@ -71,6 +71,7 @@ class CRNNRecognizer:
         TARGET_H = 64
         TARGET_W = 2048
 
+        # 1. Grayscale
         if bgr.ndim == 2:
             gray = bgr
         elif bgr.shape[2] == 4:
@@ -78,35 +79,96 @@ class CRNNRecognizer:
         else:
             gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
 
-        gray = ensure_binary_black_bg(gray)
+        # 2. Binary hóa
+        binary = ensure_binary_black_bg(gray)
 
-        h, w = gray.shape
+        # 3. Deskew từng dòng
+        binary = CRNNRecognizer._deskew_line(binary)
 
-        # Scale để chữ chiếm tỉ lệ tương tự ảnh training
-        scale_h = TARGET_H / h
-        scale_w = TARGET_W / w
-        
-        # Dùng scale nhỏ hơn để vừa khung, KHÔNG bóp méo
-        scale = min(scale_h, scale_w * 0.5)  # *0.5 để chữ không quá rộng
-        
-        new_h = min(int(h * scale), TARGET_H)
-        new_w = min(int(w * scale), TARGET_W)
+        # 4. Crop tight sau deskew (bỏ vùng đen thừa)
+        binary = CRNNRecognizer._tight_crop(binary)
 
-        resized = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        # 5. Scale giữ tỉ lệ theo H, pad W
+        h, w = binary.shape
+        scale = TARGET_H / h
+        new_w = int(w * scale)
 
-        # Pad: căn giữa theo H, căn trái theo W (giống training)
+        if new_w > TARGET_W:
+            scale = TARGET_W / w
+            new_h = int(h * scale)
+            new_w = TARGET_W
+        else:
+            new_h = TARGET_H
+
+        resized = cv2.resize(binary, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
         canvas = np.zeros((TARGET_H, TARGET_W), dtype=np.uint8)
         pad_top = (TARGET_H - new_h) // 2
-        
-        # Dịch ảnh sang phải 30 pixel thay vì dán sát lề 0
-        pad_left = 30
-        
-        # Đảm bảo phần dán vào không bị tràn khỏi TARGET_W (2048)
-        actual_w = min(new_w, TARGET_W - pad_left)
-        canvas[pad_top:pad_top + new_h, pad_left:pad_left + actual_w] = resized[:, :actual_w]
+        canvas[pad_top:pad_top + new_h, :new_w] = resized
 
         arr = canvas.astype(np.float32) / 255.0
         return torch.from_numpy(arr).unsqueeze(0).unsqueeze(0)
+
+
+    @staticmethod
+    def _deskew_line(binary: np.ndarray) -> np.ndarray:
+        """Deskew dựa trên horizontal projection — chính xác hơn minAreaRect."""
+        coords = np.column_stack(np.where(binary > 0))
+        if len(coords) < 50:
+            return binary
+
+        # Dùng horizontal projection để tìm góc nghiêng thực của DÒNG
+        # Thay vì minAreaRect (dễ bị lệch do nét chữ dọc)
+        best_angle = 0.0
+        best_score = -1.0
+
+        for angle_deg in np.arange(-10, 10.1, 0.5):
+            h, w = binary.shape
+            M = cv2.getRotationMatrix2D((w / 2, h / 2), angle_deg, 1.0)
+            rotated = cv2.warpAffine(binary, M, (w, h),
+                                    borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            # Projection theo hàng ngang
+            proj = rotated.sum(axis=1).astype(np.float32)
+            # Score = variance cao → chữ tập trung vào ít hàng → thẳng
+            score = float(np.var(proj))
+            if score > best_score:
+                best_score = score
+                best_angle = angle_deg
+
+        # Chỉ rotate nếu góc đáng kể
+        if abs(best_angle) < 0.3:
+            return binary
+
+        h, w = binary.shape
+        pad = int(h * abs(np.tan(np.radians(best_angle))) * 1.5) + 10
+        padded = cv2.copyMakeBorder(binary, 0, 0, pad, pad,
+                                    cv2.BORDER_CONSTANT, value=0)
+        ph, pw = padded.shape
+        M = cv2.getRotationMatrix2D((pw / 2, ph / 2), best_angle, 1.0)
+        rotated = cv2.warpAffine(padded, M, (pw, ph),
+                                flags=cv2.INTER_LINEAR,
+                                borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        return rotated
+
+
+    @staticmethod
+    def _tight_crop(binary: np.ndarray) -> np.ndarray:
+        """Crop bỏ vùng đen thừa xung quanh chữ, giữ lại padding nhỏ."""
+        coords = np.column_stack(np.where(binary > 0))
+        if len(coords) == 0:
+            return binary
+
+        y_min, x_min = coords.min(axis=0)
+        y_max, x_max = coords.max(axis=0)
+
+        PAD = 4
+        h, w = binary.shape
+        y1 = max(0, y_min - PAD)
+        y2 = min(h, y_max + PAD)
+        x1 = max(0, x_min - PAD)
+        x2 = min(w, x_max + PAD)
+
+        return binary[y1:y2, x1:x2]
 
     def _ctc_greedy_decode(self, log_probs: torch.Tensor) -> List[str]:
         """log_probs: (T, B, C) log-probabilities từ model.forward() → List[str] độ dài B.

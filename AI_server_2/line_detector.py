@@ -85,8 +85,8 @@ class RuledPaperLineDetector:
         min_strength_ratio: float = 0.18,
         min_line_height: int = 18,
         min_line_width_ratio: float = 0.06,
-        pad_x: int = 6,
-        pad_y: int = 6,
+        pad_x: int = 20,
+        pad_y: int = 4,
     ):
         self.min_cc_area = min_cc_area
         self.min_cc_height = min_cc_height
